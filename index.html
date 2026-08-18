@@ -237,7 +237,17 @@ const SFX = {
   score: () => { beep(880, 0.07, 'square', 0.05); setTimeout(() => beep(1320, 0.09, 'square', 0.05), 70); },
   hit:   () => beep(180, 0.16, 'sawtooth', 0.09, 60),
   die:   () => beep(300, 0.35, 'triangle', 0.06, 70),
-  swoosh:() => beep(420, 0.12, 'sine',     0.04, 700)
+  swoosh:() => beep(420, 0.12, 'sine',     0.04, 700),
+  /* Same rising arpeggio for every medal, but a longer run of it the higher
+     the tier — the ear hears the escalation without a new sound per medal. */
+  fanfare: (tier) => {
+    const notes = [523, 659, 784, 1047, 1319, 1568, 2093];
+    const count = Math.min(notes.length, 3 + tier);
+    for (let i = 0; i < count; i++) {
+      setTimeout(() => beep(notes[i], 0.16, 'square', 0.05), i * 65);
+    }
+  },
+  pop:   () => beep(1500, 0.09, 'sine',     0.035, 400)
 };
 
 /* ------------------------------------------------------------------
@@ -248,6 +258,7 @@ const READY = 'ready', PLAY = 'play', DYING = 'dying', OVER = 'over';
 
 let state, bird, pipes, score, best, ticks, groundX, farX, midX;
 let flash, shake, overTimer, newBest, paused;
+let bits, shells, flare, glow, scorePop;   // milestone flare — see below
 
 best = Number(localStorage.getItem('flappyBest') || 0);
 
@@ -265,6 +276,11 @@ function reset() {
   overTimer = 0;
   newBest = false;
   paused  = false;
+  bits    = [];
+  shells  = [];
+  flare   = null;
+  glow    = 0;
+  scorePop = 0;
 }
 
 function startPlay() {
@@ -340,6 +356,164 @@ canvas.addEventListener('mousedown', (e) => { e.preventDefault(); press(); });
 canvas.addEventListener('touchstart', (e) => { e.preventDefault(); press(); }, { passive: false });
 
 /* ------------------------------------------------------------------
+   MILESTONE FLARE
+
+   Passing a medal threshold mid-run is the thing worth chasing, so it
+   gets a celebration that visibly escalates with the tier:
+
+     BRONZE / SILVER    confetti burst off the bird, banner, fanfare
+     GOLD +             confetti keeps raining while the banner is up
+     DIAMOND +          fireworks pop across the sky
+     MASTER +           a sunburst behind the banner, colour wash
+
+   All of it is cosmetic: nothing here touches the bird, the pipes or
+   the clock, so a celebration can never cost the player a run.
+------------------------------------------------------------------ */
+
+function checkMilestone() {
+  const tier = MEDALS.findIndex(m => m.at === score);
+  if (tier < 0) return false;
+  const m = MEDALS[tier];
+
+  flare    = { m, tier, t: 0, life: 96 + tier * 8 };
+  glow     = Math.min(0.55, 0.15 + tier * 0.05);
+  scorePop = 24;
+  shake    = Math.max(shake, Math.min(5, 1.5 + tier * 0.5));
+  SFX.fanfare(tier);
+
+  /* The burst comes out of the BIRD, not the middle of the screen: it is
+     the player's moment, and it keeps the eye where the gameplay is. */
+  burst(BIRD_X, bird.y, 30 + tier * 12, m.conf, 1 + tier * 0.12);
+
+  /* Fireworks are queued, not fired at once, so they crackle in sequence. */
+  for (let i = 0, k = tier - 3; i < k; i++) shells.push(18 + i * 20);
+  return true;
+}
+
+function burst(x, y, count, palette, power) {
+  for (let i = 0; i < count; i++) {
+    const a  = Math.random() * Math.PI * 2;
+    const sp = (1.2 + Math.random() * 2.6) * power;
+    bits.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp - 1.2,        // biased upward, so it rains back down
+      w: 4 + Math.random() * 5,
+      h: 3 + Math.random() * 4,
+      spin: Math.random() * 0.3 + 0.08,
+      seed: Math.random() * 6.3,
+      col: palette[(Math.random() * palette.length) | 0],
+      t: 0,
+      life: 55 + Math.random() * 55
+    });
+  }
+}
+
+function rainBit(palette) {
+  bits.push({
+    x: Math.random() * W,
+    y: SKY_TOP - 10,
+    vx: (Math.random() - 0.5) * 0.8,
+    vy: 0.6 + Math.random() * 1.2,
+    w: 4 + Math.random() * 5,
+    h: 3 + Math.random() * 4,
+    spin: Math.random() * 0.25 + 0.06,
+    seed: Math.random() * 6.3,
+    col: palette[(Math.random() * palette.length) | 0],
+    t: 0,
+    life: 150 + Math.random() * 60
+  });
+}
+
+function updateFlare() {
+  if (glow > 0.002) glow *= 0.94; else glow = 0;
+  if (scorePop > 0) scorePop--;
+
+  if (flare) {
+    flare.t++;
+
+    /* GOLD and up keep a light snow of confetti falling behind the banner. */
+    if (flare.tier >= 2 && flare.t < flare.life * 0.7 && ticks % 2 === 0) {
+      for (let i = 0, k = 1 + (flare.tier >> 2); i < k; i++) rainBit(flare.m.conf);
+    }
+    if (flare.t >= flare.life) flare = null;
+  }
+
+  /* Queued fireworks: each is a countdown, popped high in the playable band. */
+  for (let i = shells.length - 1; i >= 0; i--) {
+    if (--shells[i] > 0) continue;
+    shells.splice(i, 1);
+    const pal = flare ? flare.m.conf : ['#ffffff'];
+    burst(W * (0.15 + Math.random() * 0.7), SKY_TOP + 40 + Math.random() * 140,
+          22, pal, 1.6);
+    SFX.pop();
+  }
+
+  for (let i = bits.length - 1; i >= 0; i--) {
+    const b = bits[i];
+    b.t++;
+    b.vy += 0.11;                        // confetti settles, it does not drop
+    b.vx *= 0.985;
+    b.vy *= 0.985;
+    b.x += b.vx;
+    b.y += b.vy;
+    /* Drift with the world so the paper belongs to the scene, not the glass. */
+    if (state === READY || state === PLAY) b.x -= SPEED * 0.35;
+    if (b.t >= b.life || b.y > H + 20 || b.x < -30) bits.splice(i, 1);
+  }
+}
+
+function drawBits() {
+  for (const b of bits) {
+    const flip = Math.abs(Math.cos(b.t * b.spin + b.seed));
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, (b.life - b.t) / 18);
+    ctx.translate(b.x, b.y);
+    ctx.rotate(b.seed + b.t * b.spin * 0.35);
+    const h = Math.max(1, b.h * flip);
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-b.w / 2 - 1, -h / 2 - 1, b.w + 2, h + 2);
+    ctx.fillStyle = b.col;
+    ctx.fillRect(-b.w / 2, -h / 2, b.w, h);
+    ctx.restore();
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawFlare() {
+  /* The banner sits where GAME OVER lands, so a run that ends moments after
+     a milestone drops it — the confetti carries on regardless. */
+  if (!flare || state === OVER) return;
+  const rise = Math.min(1, flare.t / 8);                    // pop in
+  const fade = Math.min(1, (flare.life - flare.t) / 20);    // ease out
+  const a = Math.min(rise, fade);
+  const y = uiY(112) - (1 - rise) * 12;
+
+  ctx.globalAlpha = a;
+
+  /* MASTER and up get a slow sunburst behind the name. */
+  if (flare.tier >= 6) {
+    ctx.save();
+    ctx.translate(W / 2, y + 12);
+    ctx.rotate(ticks * 0.006);
+    ctx.globalAlpha = a * 0.16;
+    ctx.fillStyle = flare.m.a;
+    for (let i = 0; i < 12; i++) {
+      ctx.rotate(Math.PI / 6);
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(230, -22); ctx.lineTo(230, 22);
+      ctx.fill();
+    }
+    ctx.restore();
+    ctx.globalAlpha = a;
+  }
+
+  drawTextCentered(flare.m.name, W / 2, y, 3, flare.m.a, '#5a4a20');
+  drawTextCentered('MEDAL', W / 2, y + lineH(3), 2, '#ffffff', '#5a4a20');
+  ctx.globalAlpha = 1;
+}
+
+/* ------------------------------------------------------------------
    UPDATE
 ------------------------------------------------------------------ */
 
@@ -349,6 +523,7 @@ function update() {
 
   if (flash > 0) flash -= 0.08;
   if (shake > 0) shake *= 0.82;
+  updateFlare();
 
   /* Parallax + ground scroll: everything freezes the moment the bird is hit */
   if (state === READY || state === PLAY) {
@@ -392,7 +567,8 @@ function update() {
       if (!p.scored && BIRD_X > p.x + PIPE_W) {
         p.scored = true;
         score++;
-        SFX.score();
+        /* A milestone brings its own fanfare — don't blip over it. */
+        if (!checkMilestone()) SFX.score();
       }
     }
 
@@ -453,10 +629,23 @@ function render() {
   const wing = (state === DYING || state === OVER) ? 1 : bird.wing;
   drawBird(BIRD_X, bird.y, bird.angle, wing);
 
+  drawBits();
+
+  if (glow > 0.01) {                     // colour wash, under the HUD so text stays legible
+    ctx.globalAlpha = glow * 0.35;
+    ctx.fillStyle = flare ? flare.m.a : '#ffffff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.globalAlpha = 1;
+  }
+
   /* HUD */
   if (state === PLAY || state === DYING) {
-    drawTextCentered(score, W / 2, 44, 6, '#fff');
+    /* The number itself kicks up a size when a milestone lands. */
+    const ss = scorePop > 0 ? 7 : 6;
+    drawTextCentered(score, W / 2, 44 - (ss - 6) * 4, ss,
+                     scorePop > 0 ? '#ffe98a' : '#fff');
   }
+  drawFlare();
 
   if (state === READY) drawReady();
   if (state === OVER)  drawGameOver();
@@ -713,17 +902,35 @@ function drawPaused() {
   drawTextCentered('PRESS P TO RESUME', W / 2, uiY(260), 2, '#ffffff');
 }
 
+/* The medal ladder, doubling as the milestone ladder: a tier's INDEX here is
+   the strength of the flare it fires, so the reward and the celebration can
+   never drift apart, and a new medal only has to be added in one place.
+   'a'/'b' are the medal's own gradient; 'conf' is its confetti. */
+const MEDALS = [
+  { at: 10,   name: 'BRONZE',      a: '#f0b978', b: '#a9662c',
+    conf: ['#f0b978', '#a9662c', '#ffd9a0', '#ffffff'] },
+  { at: 20,   name: 'SILVER',      a: '#e9eef2', b: '#9aa7b0',
+    conf: ['#e9eef2', '#9aa7b0', '#cfe4f5', '#5b8fb0', '#ffffff'] },
+  { at: 30,   name: 'GOLD',        a: '#ffe98a', b: '#d4a017',
+    conf: ['#ffe98a', '#d4a017', '#fff6c0', '#ff9f3d', '#ffffff'] },
+  { at: 50,   name: 'PLATINUM',    a: '#e6f0f8', b: '#8fa6bd',
+    conf: ['#e6f0f8', '#8fa6bd', '#2f9ed8', '#7fe6ff', '#ffffff'] },
+  { at: 100,  name: 'DIAMOND',     a: '#d8f8ff', b: '#5fc8e8',
+    conf: ['#9ff5ff', '#4ecfe0', '#e6f8ff', '#a0c0ff', '#ffffff'] },
+  { at: 200,  name: 'EMERALD',     a: '#a8f5c8', b: '#1fae6b',
+    conf: ['#5ef2a0', '#1fae6b', '#c9ffe4', '#ffe98a', '#ffffff'] },
+  { at: 500,  name: 'MASTER',      a: '#ffd0f0', b: '#b04fd0',
+    conf: ['#ff6fd8', '#8f5bff', '#5ef2a0', '#ffe98a', '#ffffff'] },
+  { at: 1000, name: 'GRANDMASTER', a: '#ffd7a8', b: '#e0562a',
+    conf: ['#ff5f6d', '#ffc371', '#5ef2a0', '#4ecfe0', '#c86bff', '#ffffff'] },
+  { at: 2000, name: 'LEGENDARY',   a: '#fff3a0', b: '#ff3d7f',
+    conf: ['#ff2d55', '#ff9f0a', '#ffd60a', '#32d74b', '#0a84ff', '#bf5af2', '#ffffff'] }
+];
+
 function medalFor(s) {
-  if (s >= 2000) return { a: '#e6f8e6', b: '#8fbd8f', name: 'LEGENDARY' };
-  if (s >= 1000) return { a: '#e6f0f8', b: '#8fa6bd', name: 'GRANDMASTER' };
-  if (s >= 500) return { a: '#e6f8e6', b: '#8fbd8f', name: 'MASTER' };
-  if (s >= 200) return { a: '#e6f0f8', b: '#8fa6bd', name: 'EMERALD' };
-  if (s >= 100) return { a: '#e6f8e6', b: '#8fbd8f', name: 'DIAMOND' };
-  if (s >= 50) return { a: '#e6f0f8', b: '#8fa6bd', name: 'PLATINUM' };
-  if (s >= 30) return { a: '#ffe98a', b: '#d4a017', name: 'GOLD' };
-  if (s >= 20) return { a: '#e9eef2', b: '#9aa7b0', name: 'SILVER' };
-  if (s >= 10) return { a: '#f0b978', b: '#a9662c', name: 'BRONZE' };
-  return null;
+  let earned = null;
+  for (const m of MEDALS) if (s >= m.at) earned = m;   // table is ascending
+  return earned;
 }
 
 function drawMedal(cx, cy, m) {
