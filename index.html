@@ -15,16 +15,15 @@
     user-select: none;
   }
   #wrap {
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
   }
   canvas {
     display: block;
+    position: absolute;
     image-rendering: pixelated;
     image-rendering: crisp-edges;
-    box-shadow: 0 0 0 4px #111, 0 12px 40px rgba(0,0,0,.6);
     cursor: pointer;
   }
 </style>
@@ -36,17 +35,29 @@
 "use strict";
 
 /* ------------------------------------------------------------------
-   SETUP  —  classic Flappy Bird resolution: 288 x 512
+   SETUP  —  classic Flappy Bird units, zoomed to fill the window.
+
+   The playable band is ALWAYS the classic 400px between ceiling and
+   ground, whatever the screen: a taller band would put consecutive gaps
+   further apart than the bird can climb between pipes. Spare room goes
+   into zoom (everything simply gets bigger) plus extra width, never into
+   a taller playfield.
 ------------------------------------------------------------------ */
 
 const canvas = document.getElementById('game');
 const ctx    = canvas.getContext('2d');
 
-const W = canvas.width;    // 288
-const H = canvas.height;   // 512
+const MIN_W      = 288;    // classic frame — the world never shrinks past this
+const MIN_H      = 512;
+const GROUND_H   = 112;    // thickness of the ground strip (512 - 400 classic)
+const PLAY_H     = 400;    // ceiling-to-ground height the bird actually flies in
 
-const GROUND_Y   = 400;    // top of the ground strip
-const BIRD_X     = 80;     // bird's fixed horizontal position
+let W        = MIN_W;      // logical width  — set by fit()
+let H        = MIN_H;      // logical height — set by fit()
+let SC       = 1;          // on-screen pixels per logical pixel
+let GROUND_Y = MIN_H - GROUND_H;   // top of the ground strip
+let SKY_TOP  = 0;          // ceiling of the playable band
+let BIRD_X   = 80;         // bird's fixed horizontal position
 
 /* Tuned so one flap lifts ~46px — a little under half the 100px gap,
    which is the control feel of the original. rise = FLAP_V^2 / (2*GRAVITY) */
@@ -62,15 +73,36 @@ const SPEED      = 1.9;    // world scroll speed (px per tick)
 
 const STEP = 1000 / 60;    // fixed timestep
 
-/* Scale the canvas to fit the window while keeping whole-pixel crispness */
+/* Fill the window with ONE uniform zoom, set by whichever screen dimension
+   runs out of room for the classic 288 x 512 frame first. The canvas keeps
+   drawing in logical pixels and the browser scales it up, so the art (and
+   with it the HUD, the panels, the bird) grows with the screen. Fractional
+   zoom is deliberate: nearest-neighbour upscaling keeps the blocks hard, and
+   snapping to whole numbers would leave a fat unfilled margin. */
 function fit() {
-  const s = Math.max(1, Math.min(
-    Math.floor(window.innerWidth  / W),
-    Math.floor(window.innerHeight / H)
-  ));
-  canvas.style.width  = (W * s) + 'px';
-  canvas.style.height = (H * s) + 'px';
+  const vw = window.innerWidth, vh = window.innerHeight;
+  SC = Math.min(vh / MIN_H, vw / MIN_W);
+
+  W = Math.ceil(vw / SC);               // spare room goes sideways...
+  H = Math.ceil(vh / SC);               // ...or into sky above the ceiling
+  GROUND_Y = H - GROUND_H;
+  SKY_TOP  = GROUND_Y - PLAY_H;
+  BIRD_X   = Math.round(W * 0.28);      // 80 at the classic width
+
+  canvas.width  = W;                    // resizing clears the canvas, but
+  canvas.height = H;                    // render() repaints it every frame
+
+  canvas.style.width  = (W * SC) + 'px';
+  canvas.style.height = (H * SC) + 'px';
+  /* Rounding the logical size up can overshoot the viewport by under a
+     pixel — centre the canvas so that overhang is cropped evenly. */
+  canvas.style.left = ((vw - W * SC) / 2) + 'px';
+  canvas.style.top  = ((vh - H * SC) / 2) + 'px';
 }
+
+/* The screens were laid out against the classic frame, so they hang off the
+   ceiling of the playable band rather than the top of the canvas. */
+function uiY(y) { return SKY_TOP + y; }
 window.addEventListener('resize', fit);
 fit();
 
@@ -221,7 +253,7 @@ best = Number(localStorage.getItem('flappyBest') || 0);
 
 function reset() {
   state   = READY;
-  bird    = { y: 250, vy: 0, angle: 0, wing: 0, wingTick: 0 };
+  bird    = { y: uiY(250), vy: 0, angle: 0, wing: 0, wingTick: 0 };
   pipes   = [];
   score   = 0;
   ticks   = 0;
@@ -238,9 +270,11 @@ function reset() {
 function startPlay() {
   state = PLAY;
   bird.vy = 0;
-  spawnPipe(W + 40);
-  spawnPipe(W + 40 + PIPE_SPACE);
-  spawnPipe(W + 40 + PIPE_SPACE * 2);
+  /* Seed the runway from a fixed distance AHEAD OF THE BIRD, not from the
+     right edge: on a wide window the edge is far away, and starting there
+     would leave the player gliding through empty sky for several seconds.
+     Pipes carry on past the edge so the row never runs dry. */
+  for (let x = BIRD_X + 248; x <= W + 340; x += PIPE_SPACE) spawnPipe(x);
   flap();
 }
 
@@ -251,7 +285,7 @@ function startPlay() {
 const MAX_GAP_DROP = 125;
 
 function spawnPipe(x) {
-  let minY = 60;
+  let minY = SKY_TOP + 60;
   let maxY = GROUND_Y - PIPE_GAP - 60;
 
   if (pipes.length) {
@@ -325,7 +359,7 @@ function update() {
 
   /* --- READY: bird bobs in place --- */
   if (state === READY) {
-    bird.y = 250 + Math.sin(ticks / 9) * 6;
+    bird.y = uiY(250) + Math.sin(ticks / 9) * 6;
     bird.angle = 0;
     animateWing(4);
     return;
@@ -343,7 +377,7 @@ function update() {
     animateWing(bird.vy < 0 ? 3 : 7);
 
     /* Ceiling: clamp instead of killing (as in the original) */
-    if (bird.y < 12) { bird.y = 12; bird.vy = 0; }
+    if (bird.y < SKY_TOP + 12) { bird.y = SKY_TOP + 12; bird.vy = 0; }
 
     /* Pipes */
     for (const p of pipes) p.x -= SPEED;
@@ -452,26 +486,27 @@ function puff(x, y, r) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, Math.PI * 2);
 function drawClouds() {
   ctx.fillStyle = '#e8fbfb';
   ctx.beginPath();
-  for (let i = -1; i < 6; i++) {
+  const cy = GROUND_Y - 104;
+  for (let i = -1; i * 60 - farX < W; i++) {
     const x = i * 60 - farX;
-    puff(x + 10, 296, 12); puff(x + 24, 291, 16); puff(x + 40, 296, 11);
+    puff(x + 10, cy, 12); puff(x + 24, cy - 5, 16); puff(x + 40, cy, 11);
   }
   ctx.fill();
   ctx.fillStyle = '#f6ffff';
-  ctx.fillRect(0, 296, W, 14);
+  ctx.fillRect(0, cy, W, 14);
 }
 
 function drawSkyline() {
-  const base = 330;
+  const base = GROUND_Y - 70;
   ctx.fillStyle = '#4ab0b6';
-  for (let i = -1; i < 8; i++) {
+  for (let i = -1; i * 48 - midX < W; i++) {
     const x = i * 48 - midX;
     const h = [34, 22, 44, 28, 38, 26][((i % 6) + 6) % 6];
     ctx.fillRect(x, base - h, 34, h);
     ctx.fillRect(x + 12, base - h - 8, 10, 8);          // rooftop block
   }
   ctx.fillStyle = '#7fd6d6';                             // windows
-  for (let i = -1; i < 8; i++) {
+  for (let i = -1; i * 48 - midX < W; i++) {
     const x = i * 48 - midX;
     const h = [34, 22, 44, 28, 38, 26][((i % 6) + 6) % 6];
     for (let wy = base - h + 6; wy < base - 6; wy += 8) {
@@ -485,10 +520,10 @@ function drawSkyline() {
 }
 
 function drawBushes() {
-  const top = 334;
+  const top = GROUND_Y - 66;
   ctx.fillStyle = '#5ec74a';
   ctx.beginPath();
-  for (let i = -1; i < 12; i++) {
+  for (let i = -3; i * 30 - midX * 1.6 < W; i++) {
     const x = i * 30 - midX * 1.6;
     puff(x + 8, top + 8, 13); puff(x + 22, top + 6, 10);
   }
@@ -649,16 +684,17 @@ function drawBird(x, y, angle, wing) {
 /* --- Screens --- */
 
 function drawReady() {
-  drawTextCentered('FLAPPY BIRD', W / 2, 96, 4, '#ffd83d');
-  drawTextCentered('GET READY', W / 2, 150, 4, '#ffffff');
+  drawTextCentered('FLAPPY BIRD', W / 2, uiY(96), 4, '#ffd83d');
+  drawTextCentered('GET READY', W / 2, uiY(150), 4, '#ffffff');
 
   /* Tap hint (blinks) */
   if (Math.floor(ticks / 24) % 2 === 0) {
-    drawTextCentered('SPACE  OR  CLICK', W / 2, 316, 2, '#ffffff');
-    drawTextCentered('TO FLAP', W / 2, 316 + lineH(2), 2, '#ffffff');
+    drawTextCentered('SPACE  OR  CLICK', W / 2, uiY(316), 2, '#ffffff');
+    drawTextCentered('TO FLAP', W / 2, uiY(316) + lineH(2), 2, '#ffffff');
   }
-  drawHand(W / 2 + 34, 262 + Math.sin(ticks / 12) * 4);
-  drawTextCentered('P PAUSE   M MUTE', W / 2, 470, 2, '#ffffff', '#7a6a3a');
+  /* The hand gestures AT the bird, so it tracks the bird, not the screen. */
+  drawHand(BIRD_X + 98, uiY(262) + Math.sin(ticks / 12) * 4);
+  drawTextCentered('P PAUSE   M MUTE', W / 2, GROUND_Y + 70, 2, '#ffffff', '#7a6a3a');
 }
 
 function drawHand(x, y) {
@@ -673,8 +709,8 @@ function drawHand(x, y) {
 function drawPaused() {
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.fillRect(0, 0, W, H);
-  drawTextCentered('PAUSED', W / 2, 210, 5, '#ffffff');
-  drawTextCentered('PRESS P TO RESUME', W / 2, 260, 2, '#ffffff');
+  drawTextCentered('PAUSED', W / 2, uiY(210), 5, '#ffffff');
+  drawTextCentered('PRESS P TO RESUME', W / 2, uiY(260), 2, '#ffffff');
 }
 
 function medalFor(s) {
@@ -731,9 +767,10 @@ function drawGameOver() {
   const slide = Math.min(1, overTimer / 12);
   const ease  = 1 - Math.pow(1 - slide, 3);
 
-  drawTextCentered('GAME OVER', W / 2, 108 - (1 - ease) * 30, 5, '#ffd83d');
+  drawTextCentered('GAME OVER', W / 2, uiY(108) - (1 - ease) * 30, 5, '#ffd83d');
 
-  const px = 31, py = 156 + (1 - ease) * 40, pw = 226, ph = 116;
+  const pw = 226, ph = 116;
+  const px = Math.round((W - pw) / 2), py = uiY(156) + (1 - ease) * 40;
 
   ctx.fillStyle = '#5a4a20';
   ctx.beginPath(); ctx.roundRect(px - 3, py - 3, pw + 6, ph + 6, 8); ctx.fill();
@@ -780,8 +817,8 @@ function drawGameOver() {
   }
 
   if (overTimer > 25 && Math.floor(ticks / 22) % 2 === 0) {
-    drawTextCentered('CLICK OR SPACE', W / 2, 300, 2, '#ffffff');
-    drawTextCentered('TO TRY AGAIN', W / 2, 300 + lineH(2), 2, '#ffffff');
+    drawTextCentered('CLICK OR SPACE', W / 2, uiY(300), 2, '#ffffff');
+    drawTextCentered('TO TRY AGAIN', W / 2, uiY(300) + lineH(2), 2, '#ffffff');
   }
 }
 
